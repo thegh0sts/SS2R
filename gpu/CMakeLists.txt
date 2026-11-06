@@ -252,16 +252,15 @@ if (WIN32)
     target_link_libraries(bb-gpu-capabilities PRIVATE Vulkan::Vulkan PkgConfig::SDL3)
     # The launcher (CTR-NitroFueled-PC.exe, launcher/windows): Dear ImGui on Win32 + Direct3D 11,
     # linked statically, so the .exe next to run.py needs no DLL from bin\.
-    add_executable(ctr-launcher WIN32 ../launcher/windows/launcher.cpp ../launcher/windows/gamepads.cpp
+    add_executable(ss2-launcher WIN32 ../launcher/windows/ss2_launcher.cpp
         third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
         third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
-        third_party/imgui/backends/imgui_impl_dx11.cpp ../packaging/windows/launcher.rc)
-    # gamepads.cpp: SDL3's headers only; bin\SDL3.dll is loaded at run time.
-    target_include_directories(ctr-launcher PRIVATE third_party/imgui third_party/imgui/backends ${SDL3_INCLUDE_DIRS})
-    target_compile_definitions(ctr-launcher PRIVATE UNICODE _UNICODE)
-    target_link_options(ctr-launcher PRIVATE -static -municode -s)
-    target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi ole32 shell32 uuid windowscodecs bcrypt)
-    set_target_properties(ctr-launcher PROPERTIES OUTPUT_NAME CTR-NitroFueled-PC INTERPROCEDURAL_OPTIMIZATION OFF)
+        third_party/imgui/backends/imgui_impl_dx11.cpp)
+    target_include_directories(ss2-launcher PRIVATE third_party/imgui third_party/imgui/backends)
+    target_compile_definitions(ss2-launcher PRIVATE UNICODE _UNICODE)
+    target_link_options(ss2-launcher PRIVATE -static -municode -s)
+    target_link_libraries(ss2-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi ole32 shell32 uuid)
+    set_target_properties(ss2-launcher PROPERTIES OUTPUT_NAME SS2R-Launcher INTERPROCEDURAL_OPTIMIZATION OFF)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.

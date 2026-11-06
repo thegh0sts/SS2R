@@ -27,7 +27,7 @@ MINGW*|MSYS*)
         grep -v '^\[' out/gpu-build.log | tail -40 >&2
         echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
     fi
-    cp out/gpu/sacredfire.exe out/gpu/bb-gpu-capabilities.exe out/gpu/CTR-NitroFueled-PC.exe out/
+    cp out/gpu/sacredfire.exe out/gpu/bb-gpu-capabilities.exe out/gpu/SS2R-Launcher.exe out/
     version=$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)
     printf '%s-windows\n' "$version" > out/VERSION
     echo "Built $PWD/out/sacredfire.exe ($(cat out/VERSION))"
