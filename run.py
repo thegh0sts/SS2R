@@ -20,8 +20,8 @@ import threading
 import time
 
 PORT = Path(__file__).resolve().parent
-TITLE_ID = 'CUSA13795'
-APP_VERSION = '01.21'
+TITLE_ID = 'CUSA51878'
+APP_VERSION = '01.04'
 RESTART_CODE = 75  # the game asks to be started again (in-game "Apply and restart")
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
 

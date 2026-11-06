@@ -18,7 +18,7 @@ import struct
 from prepare import parse_self, span, unpack
 from link_libc import encode_id
 
-DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
+DEFAULT_MODULES = ('libfmod.prx', 'libPlayFabMultiplayer.prx', 'Party.prx')
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
 
 
@@ -199,14 +199,21 @@ def link(game, out, module_names=DEFAULT_MODULES):
     # SacredFire: the loader and runtime see every import as NID#library (the eboot's own
     # library/module indices stay inside boot.bin and this linker). Plain names stay as they are.
     def canonical(name):
+        # ADD THIS EXACT 2-LINE CHECK AT THE TOP OF THE FUNCTION:
+        if name == "bzQExy189ZI#z#w":
+            return "bzQExy189ZI#libc"
+
         identity = main['identity'](name)
         return f'{identity[0]}#{identity[1][0]}' if identity else name
     names = [canonical(name) for name in names]
     bindings, unresolved = [], []
     for identity, index in identities.items():
         found = exports.get(identity)
-        if not found and identity and identity[1][0] == 'libSceLibcInternal':
-            candidates = by_nid.get((identity[0], 'libc'), [])
+        if not found and identity:
+            # Same NID from the same library name: accept when exactly one module exports it,
+            # even if library/module version attributes differ.
+            lib = 'libc' if identity[1][0] == 'libSceLibcInternal' else identity[1][0]
+            candidates = by_nid.get((identity[0], lib), [])
             found = candidates[0] if len(candidates) == 1 else None
         if found:
             bindings.append((index, found[0], found[1]))

@@ -14,4 +14,12 @@
 #endif
 #ifndef _countof
 #define _countof(array) (sizeof(array) / sizeof((array)[0]))
+#endif // This closes out any unclosed upstream blocks cleanly
+
+// ═════════════════════════════════════════════════════════════════════════
+// FIXED SYNCHRONIZATION OVERRIDE: Guarantee lock visibility to the FFX SDK
+// ═════════════════════════════════════════════════════════════════════════
+#ifdef __cplusplus
+#include <mutex>
 #endif
+

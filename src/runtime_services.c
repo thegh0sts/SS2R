@@ -654,7 +654,73 @@ static ABI int32_t mouse_read(int32_t handle,unsigned char *data,int32_t count) 
 }
 static ABI int32_t mouse_close(int32_t handle) { (void)handle; return 0; }
 static ABI int32_t audio_in_open(void) { return AUDIO_IN_NOT_OPENED; }
+/* libSceSystemGesture: touchpad gestures. Nothing to recognize on PC yet: setup succeeds,
+ * queries report zero events. */
+static ABI int32_t gesture_ok(void) { return 0; }
+static ABI int32_t gesture_open(int32_t port, const void* param) { (void)port; (void)param; return 1; }
+static ABI int32_t gesture_count_zero(void) { return 0; }
+static ABI int32_t gesture_primitive_events(int32_t handle, void* events, uint32_t capacity, uint32_t* count) {
+    (void)handle; (void)events; (void)capacity; if (count) *count = 0; return 0;
+}
+static ABI int32_t gesture_touch_events(int32_t handle, void* recognizer, void* events, uint32_t capacity, uint32_t* count) {
+    (void)handle; (void)recognizer; (void)events; (void)capacity; if (count) *count = 0; return 0;
+}
 
+/* There are never any events, so any index is out of range. */
+static ABI int32_t gesture_no_event(void) { return (int32_t)0x80810004; }
+
+/* libSceIme keyboard (USB keyboard API): opening succeeds, no keyboard device is reported,
+ * and no key events are delivered. Host keyboard input reaches the game through the pad layer. */
+#define IME_ERROR_NO_KEYBOARD ((int32_t)0x80BC0008)
+static ABI int32_t ime_kb_open(int32_t user, const void* param) { (void)user; (void)param; return 0; }
+static ABI int32_t ime_kb_close(int32_t user) { (void)user; return 0; }
+static ABI int32_t ime_update(void* handler) { (void)handler; return 0; }
+static ABI int32_t ime_kb_none(void) { return IME_ERROR_NO_KEYBOARD; }
+
+/* libSceNgs2 (audio synthesis), silent: objects can be created, voices never play,
+ * rendering writes silence. Handles are small zeroed host blocks, never read by the game. */
+typedef struct { void* buffer; size_t size; uint32_t waveform, channels; } Ngs2RenderBuffer;
+static void* ngs2_handle(void) { return calloc(1, 64); }
+static void ngs2_release(void* handle, void** buffer_info) {
+    free(handle);
+    if (buffer_info) { buffer_info[0] = NULL; buffer_info[1] = NULL; }   /* hostBuffer, hostBufferSize */
+}
+static ABI int32_t ngs2_system_create(const void* option, const void* allocator, void** out) {
+    (void)option; (void)allocator; if (!out) return (int32_t)0x804A0001;
+    *out = ngs2_handle(); return 0;
+}
+static ABI int32_t ngs2_system_destroy(void* handle, void** info) { ngs2_release(handle, info); return 0; }
+static ABI int32_t ngs2_system_render(void* handle, const Ngs2RenderBuffer* buffers, uint32_t count) {
+    (void)handle;
+    for (uint32_t i = 0; buffers && i < count; ++i)
+        if (buffers[i].buffer) memset(buffers[i].buffer, 0, buffers[i].size);
+    return 0;
+}
+static ABI int32_t ngs2_rack_create(void* system, uint32_t rack_id, const void* option, const void* allocator, void** out) {
+    (void)system; (void)rack_id; (void)option; (void)allocator; if (!out) return (int32_t)0x804A0001;
+    *out = ngs2_handle(); return 0;
+}
+static ABI int32_t ngs2_rack_destroy(void* handle, void** info) { ngs2_release(handle, info); return 0; }
+static ABI int32_t ngs2_rack_voice(void* rack, uint32_t index, void** out) {
+    (void)index; if (!out) return (int32_t)0x804A0001;
+    *out = (char*)rack + 8;   /* any stable non-NULL value works: the game only passes it back */
+    return 0;
+}
+static ABI int32_t ngs2_voice_control(void* voice, const void* params) { (void)voice; (void)params; return 0; }
+static ABI int32_t ngs2_voice_state(void* voice, void* state, size_t size) {
+    (void)voice; if (state && size) memset(state, 0, size); return 0;
+}
+static ABI int32_t ngs2_voice_flags(void* voice, uint32_t* flags) { (void)voice; if (flags) *flags = 0; return 0; }
+static ABI int32_t ngs2_ok(void) { return 0; }
+
+/* Thread scheduling queries: report the PS4 defaults (SCHED_OTHER = 2, priority 700);
+ * changes are accepted, and Windows keeps its own scheduling. */
+static ABI int32_t sched_get(void* thread, int32_t* policy, int32_t* param) {
+    (void)thread; if (policy) *policy = 2; if (param) *param = 700; return 0;
+}
+static ABI int32_t sched_set(void* thread, int32_t policy, const int32_t* param) {
+    (void)thread; (void)policy; (void)param; return 0;
+}
 
 static const RuntimeExport exports[]={
     {"sceUserServiceInitialize",user_initialize}, {"sceUserServiceTerminate",user_terminate},
@@ -696,6 +762,7 @@ static const RuntimeExport exports[]={
     {"sceNpGetState",np_state}, {"sceNpGetOnlineId",np_signed_out}, {"sceNpGetNpId",np_signed_out},
     {"sceNpRegisterStateCallback",np_register}, {"sceNpUnregisterStateCallback",ok_void},
     {"sceNpRegisterGamePresenceCallback",np_register_void}, {"sceNpRegisterPlusEventCallback",np_register},
+    { "sceNpRegisterNpReachabilityStateCallback",np_register_void }, { "sceNpUnregisterNpReachabilityStateCallback",ok_void },
     {"sceNpUnregisterPlusEventCallback",ok_void}, {"sceNpCheckCallback",ok_void},
     {"sceNpSetNpTitleId",ok_void}, {"sceNpNotifyPlusFeature",ok_void}, {"sceNpSetContentRestriction",ok_void},
     {"sceNpCreateAsyncRequest",np_request}, {"sceNpDeleteRequest",ok_void}, {"sceNpAbortRequest",ok_void},
@@ -807,5 +874,29 @@ static const RuntimeExport exports[]={
     {"sceAudioInOpen",audio_in_open},
     {"sceDiscMapIsRequestOnHDD",discmap_on_hdd}, {"sceDiscMap_8A828CAEE7EDD5E9",discmap_8a82},
     {"sceVoiceInit",ok_void}, {"sceVoiceEnd",ok_void},
+    { "sceSystemGestureInitializePrimitiveTouchRecognizer",gesture_ok },
+    { "sceSystemGestureFinalizePrimitiveTouchRecognizer",gesture_ok },
+    { "sceSystemGestureResetPrimitiveTouchRecognizer",gesture_ok },
+    { "sceSystemGestureUpdatePrimitiveTouchRecognizer",gesture_ok },
+    { "sceSystemGestureGetPrimitiveTouchEvents",gesture_primitive_events },
+    { "sceSystemGestureGetPrimitiveTouchEventsCount",gesture_count_zero },
+    { "sceSystemGestureOpen",gesture_open }, { "sceSystemGestureClose",gesture_ok },
+    { "sceSystemGestureCreateTouchRecognizer",gesture_ok },
+    { "sceSystemGestureResetTouchRecognizer",gesture_ok },
+    { "sceSystemGestureUpdateTouchRecognizer",gesture_ok },
+    { "sceSystemGestureUpdateAllTouchRecognizer",gesture_ok },
+    { "sceSystemGestureGetTouchEvents",gesture_touch_events },
+    { "sceSystemGestureGetTouchEventsCount",gesture_count_zero }, { "sceSystemGestureAppendTouchRecognizer",gesture_ok },
+    { "sceSystemGestureRemoveTouchRecognizer",gesture_ok },
+    { "sceSystemGestureGetTouchEventByIndex",gesture_no_event }, { "sceImeKeyboardOpen",ime_kb_open }, { "sceImeKeyboardClose",ime_kb_close },
+    { "sceImeUpdate",ime_update },
+    { "sceImeKeyboardGetResourceId",ime_kb_none }, { "sceImeKeyboardGetInfo",ime_kb_none }, { "sceNgs2SystemCreateWithAllocator",ngs2_system_create }, { "sceNgs2SystemDestroy",ngs2_system_destroy },
+    { "sceNgs2SystemRender",ngs2_system_render },
+    { "sceNgs2RackCreateWithAllocator",ngs2_rack_create }, { "sceNgs2RackDestroy",ngs2_rack_destroy },
+    { "sceNgs2RackGetVoiceHandle",ngs2_rack_voice },
+    { "sceNgs2VoiceControl",ngs2_voice_control }, { "sceNgs2VoiceGetState",ngs2_voice_state },
+    { "sceNgs2VoiceGetStateFlags",ngs2_voice_flags },
+    { "sceNgs2PanInit",ngs2_ok }, { "sceNgs2PanGetVolumeMatrix",ngs2_ok }, { "scePthreadGetschedparam",sched_get }, { "scePthreadSetschedparam",sched_set },
+    { "pthread_getschedparam",sched_get }, { "pthread_setschedparam",sched_set },
 };
 uintptr_t runtime_services_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

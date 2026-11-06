@@ -28,15 +28,15 @@ from pathlib import Path
 # patches.py has a patch file for it.
 SUPPORTED = {
     '2f2115893ac6656925d20a0221f118cff398fbd754cb9c10154451411dbcf8e6': dict(
-        name='ctr', title='CUSA13795', version='01.21', game='Crash Team Racing Nitro-Fueled', update='CUSA13795-patch',
-        modules=('libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx'), patches=True),
+        name='ctr', title='CUSA51878', version='01.04', game='System Shock 2 Remaster', update='CUSA51878-patch',
+        modules=('libfmod.prx', 'libPlayFabMultiplayer.prx', 'Party.prx'), patches=True),
 }
 BY_TITLE = {p['title']: p for p in SUPPORTED.values()}
 # Editions accepted by title at any version, whatever their executable.
 EDITIONS = {
-    'CUSA14876': dict(
-        name='ctr', title='CUSA14876', version='01.21', game='Crash Team Racing Nitro-Fueled (EU)',
-        update='CUSA14876-patch', modules=('libc.prx', 'libSceFios2.prx', 'libSceNpToolkit2.prx'),
+    'CUSA51878': dict(
+        name='ctr', title='CUSA51878', version='01.04', game='System Shock 2 Remaster',
+        update='CUSA51878-patch', modules=('libfmod.prx', 'libPlayFabMultiplayer.prx', 'Party.prx'),
         patches=True),
 }
 # Images that are known NOT to be 1.21: the base game's executable (1.00). With a 1.21 param.sfo
@@ -44,9 +44,9 @@ EDITIONS = {
 OLD_IMAGES = {
     'a9cdc80f2170624e08bdddab128fc9cdaf5c71aa90c00fc669d830e366ba6833': '01.00',
 }
-SUPPORTED_TITLE = 'CUSA13795'
-SUPPORTED_VERSION = '01.21'
-SUPPORTED_IMAGE = '2f2115893ac6656925d20a0221f118cff398fbd754cb9c10154451411dbcf8e6'
+SUPPORTED_TITLE = 'CUSA51878'
+SUPPORTED_VERSION = '01.04'
+SUPPORTED_IMAGE = ''
 
 
 def image_sha256(game):

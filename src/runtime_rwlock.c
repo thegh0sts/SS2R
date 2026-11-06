@@ -144,10 +144,26 @@ static ABI int32_t rw_destroy(Rwlock **handle) {
 }
 /* SacredFire: the POSIX names (NpToolkit2, online) return the errno itself, not 0x8002xxxx. */
 static int32_t posix_error(int32_t e) { return e ? (int32_t)((uint32_t)e & 0xffff) : 0; }
+/* POSIX names (libScePosix): same locks, POSIX error numbers instead of Sony codes. */
+static int32_t posix_code(int32_t r) { return r ? (r & 0xffff) : 0; }
+static ABI int32_t posix_rw_init(Rwlock** lock, void* const* attr) { return posix_code(rw_init(lock, attr, NULL)); }
+static ABI int32_t posix_rw_destroy(Rwlock** lock) { return posix_code(rw_destroy(lock)); }
+static ABI int32_t posix_rw_tryread(Rwlock** lock) { return posix_code(rw_tryread(lock)); }
+static ABI int32_t posix_rw_trywrite(Rwlock** lock) { return posix_code(rw_trywrite(lock)); }
 static ABI int32_t posix_rw_read(Rwlock **r) { return posix_error(rw_read(r)); }
 static ABI int32_t posix_rw_write(Rwlock **r) { return posix_error(rw_write(r)); }
 static ABI int32_t posix_rw_unlock(Rwlock **r) { return posix_error(rw_unlock(r)); }
 uintptr_t runtime_rwlock_resolve(const char *name) {
+    const char* s = runtime_symbol(name);
+    if (s) {
+        if (!strcmp(s, "pthread_rwlock_init"))      return (uintptr_t)posix_rw_init;
+        if (!strcmp(s, "pthread_rwlock_destroy"))   return (uintptr_t)posix_rw_destroy;
+        if (!strcmp(s, "pthread_rwlock_rdlock"))    return (uintptr_t)posix_rw_read;
+        if (!strcmp(s, "pthread_rwlock_wrlock"))    return (uintptr_t)posix_rw_write;
+        if (!strcmp(s, "pthread_rwlock_unlock"))    return (uintptr_t)posix_rw_unlock;
+        if (!strcmp(s, "pthread_rwlock_tryrdlock")) return (uintptr_t)posix_rw_tryread;
+        if (!strcmp(s, "pthread_rwlock_trywrlock")) return (uintptr_t)posix_rw_trywrite;
+    }
     if (runtime_nid_equals(name,"iGjsr1WAtI0#libkernel")) return (uintptr_t)posix_rw_read;
     if (runtime_nid_equals(name,"sIlRvQqsN2Y#libkernel")) return (uintptr_t)posix_rw_write;
     if (runtime_nid_equals(name,"EgmLo6EWgso#libkernel")) return (uintptr_t)posix_rw_unlock;

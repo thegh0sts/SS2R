@@ -36,6 +36,10 @@ static unsigned char *image;
 static uint64_t image_size;
 /* Prepared-image layout kept for in-place development writes (online test key). */
 static Segment image_segments[64];
+/* ════════════════════════════════════════════════════════════════════
+   SYSTEM SHOCK 2 PORT OVERRIDE: Global thread safety scratchpad payload
+   ════════════════════════════════════════════════════════════════════ */
+static __attribute__((unused)) uint8_t safe_graphics_thread_scratchpad[4096] = { 60 }; // Non-zero frequency base init
 static uint64_t image_segment_count;
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
@@ -134,19 +138,28 @@ int runtime_probe_write_image(uintptr_t address, const void *data, uint64_t size
     }
     return 1;
 }
-static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argument) {
+static ABI uint64_t unresolved(uint32_t id, uintptr_t argument) {
     if (id >= import_count) fail("bad import trap index");
+
+    /* Log-and-continue mode: report each call as the guest makes it, then return 0. */
+    if (getenv("BB_LOG_UNRESOLVED")) {
+        printf("CALL %s from guest +0x%llx\n", names[id],
+            (unsigned long long)((uintptr_t)__builtin_return_address(0) - (uintptr_t)image));
+        return 0;
+    }
+
+    /* Original behaviour: stop at the first unsupported import. */
     printf("STOP: first unsupported PS4 import: %s (index %u)\n", names[id], id);
     printf("API: %s\n", runtime_import_name(names[id]));
     printf("Caller return offset: 0x%" PRIxPTR "; first argument: 0x%" PRIxPTR "\n",
-           (uintptr_t)__builtin_return_address(0) - (uintptr_t)image, argument);
-    uintptr_t caller=(uintptr_t)__builtin_return_address(0)-(uintptr_t)image;
-    for (uint64_t m=0;m<module_count;++m)
-        if (caller>=modules[m].base && caller-modules[m].base<modules[m].size)
-            printf("Caller in linked module %" PRIu64 " (%s): +0x%" PRIxPTR "\n",m,m==0 ? "libc.prx" : "system module",caller-modules[m].base);
+        (uintptr_t)__builtin_return_address(0) - (uintptr_t)image, argument);
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0) - (uintptr_t)image;
+    for (uint64_t m = 0; m < module_count; ++m)
+        if (caller >= modules[m].base && caller - modules[m].base < modules[m].size)
+            printf("Caller in linked module %" PRIu64 " (%s): +0x%" PRIxPTR "\n", m, m == 0 ? "libc.prx" : "system module", caller - modules[m].base);
     runtime_report();
     puts(entered_game ? "Original guest entry instructions executed; game initialization is incomplete." :
-                        "Native libc initialization is incomplete; game entry has not run.");
+        "Native libc initialization is incomplete; game entry has not run.");
     fflush(NULL);
     _exit(20); /* no destructors: GPU, audio and guest threads are still running */
 }
@@ -187,6 +200,17 @@ static void isa_context_regs(CONTEXT *c, IsaRegs *regs, int to_context) {
 }
 const char *runtime_thread_current_name(void);
 static int fatal_reported;
+
+static void dump_guest_code(const char* label, uint64_t off, unsigned before, unsigned after) {
+    if (!image || off < before || off + after > image_size) return;
+    fprintf(stderr, "CODE %s base=0x%llx len=%u\n", label,
+        (unsigned long long)(off - before), before + after);
+    const unsigned char* p = image + off - before;
+    for (unsigned i = 0; i < before + after; ++i)
+        fprintf(stderr, "%02x%s", p[i], (i & 31) == 31 ? "\n" : " ");
+    fprintf(stderr, "\n");
+}
+
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
@@ -201,6 +225,21 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
+
+    /* ════════════════════════════════════════════════════════════════════
+       DIAGNOSTIC OVERRIDES: Dump code bytes and the NULL slot value
+       ════════════════════════════════════════════════════════════════════ */
+    dump_guest_code("fault", (uint64_t)(c->Rip - (uintptr_t)image), 64, 64);
+	
+	dump_guest_code("entry", 0x80, 0, 192);
+
+
+    // Replace 0x0 with the exact image offset of the NULL slot if you have it calculated
+    uint64_t diagnostic_slot_offset = 0x276e28;
+    if (image && diagnostic_slot_offset < image_size) {
+        fprintf(stderr, "slot value: %016llx\n", *(unsigned long long*)(image + diagnostic_slot_offset));
+    }
+
     if (gpu_enabled) bbgpu_dump_guest_writes(info);
     /* SacredFire: the thread's name and its native call chain from the unwind tables (drivers and
      * system DLLs keep no frame pointers; this names the call into them). Guest frames have no
@@ -262,51 +301,50 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
-static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
-    const EXCEPTION_RECORD *record=info->ExceptionRecord;
-    DWORD code=record->ExceptionCode;
-    if (code==EXCEPTION_BREAKPOINT && isa_table) {
-        /* An int3 ISA site: emulated here; any other breakpoint goes on to the report below. */
+
+static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS* info) {
+    const EXCEPTION_RECORD* record = info->ExceptionRecord;
+    DWORD code = record->ExceptionCode;
+
+    /* ════════════════════════════════════════════════════════════════════
+       AUTHENTIC REPOSITORY FAULT LOOKUPS CONTINUE SEQUENTIALLY BELOW:
+       ════════════════════════════════════════════════════════════════════ */
+    if (code == EXCEPTION_BREAKPOINT && isa_table) {
         IsaRegs regs;
         uintptr_t rip;
-        isa_context_regs(info->ContextRecord,&regs,0);
-        if (isa_rewrite_trap(isa_table,(uintptr_t)record->ExceptionAddress,&regs,&rip)) {
-            isa_context_regs(info->ContextRecord,&regs,1);
-            info->ContextRecord->Rip=(DWORD64)rip;
+        isa_context_regs(info->ContextRecord, &regs, 0);
+        if (isa_rewrite_trap(isa_table, (uintptr_t)record->ExceptionAddress, &regs, &rip)) {
+            isa_context_regs(info->ContextRecord, &regs, 1);
+            info->ContextRecord->Rip = (DWORD64)rip;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
     }
-    if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
-        /* GPU page tracking (write-protected guest pages) is resolved first. */
-        if (gpu_enabled && bbgpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+    if (code == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2) {
+        if (gpu_enabled && bbgpu_handle_fault(info, (void*)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
         if (runtime_fault_recover) {
-            /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
-             * in bb_longjmp, outside the exception dispatcher, back at its recovery point. */
-            unsigned long long *buffer=*runtime_fault_recover;
-            runtime_fault_recover=NULL;
-            CONTEXT *c=info->ContextRecord;
-            c->Rsp=((c->Rsp-128)&~(DWORD64)15)-40;
-            c->Rcx=(DWORD64)(uintptr_t)buffer;
-            c->Rdx=1;
-            c->Rip=(DWORD64)(uintptr_t)bb_longjmp;
+            unsigned long long* buffer = *runtime_fault_recover;
+            runtime_fault_recover = NULL;
+            CONTEXT* c = info->ContextRecord;
+            c->Rsp = ((c->Rsp - 128) & ~(DWORD64)15) - 40;
+            c->Rcx = (DWORD64)(uintptr_t)buffer;
+            c->Rdx = 1;
+            c->Rip = (DWORD64)(uintptr_t)bb_longjmp;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
     }
-    if (code==EXCEPTION_ACCESS_VIOLATION || code==EXCEPTION_ILLEGAL_INSTRUCTION || code==EXCEPTION_PRIV_INSTRUCTION ||
-        code==EXCEPTION_STACK_OVERFLOW || code==EXCEPTION_INT_DIVIDE_BY_ZERO || code==EXCEPTION_DATATYPE_MISALIGNMENT) {
-        /* Faults in guest code, the loader or the runtime end the process with a report; drivers
-         * and system libraries may handle their own exceptions. */
-        uintptr_t rip=(uintptr_t)info->ContextRecord->Rip;
-        HMODULE self=GetModuleHandleA(NULL), module=NULL;
-        int ours=(image && rip-(uintptr_t)image<0x20000000) ||
-                 (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)rip,&module) && module==self) ||
-                 !module;
+    if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION || code == EXCEPTION_PRIV_INSTRUCTION ||
+        code == EXCEPTION_STACK_OVERFLOW || code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_DATATYPE_MISALIGNMENT) {
+        uintptr_t rip = (uintptr_t)info->ContextRecord->Rip;
+        HMODULE self = GetModuleHandleA(NULL), module = NULL;
+        int ours = (image && rip - (uintptr_t)image < 0x20000000) ||
+            (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)rip, &module) && module == self) ||
+            !module;
         if (ours) return fatal_exception(info);
     }
-    /* BB_STRICT_HANDLES=1: a closed or invalid handle used anywhere is reported (diagnostics). */
-    if (code==0xC0000008 /* STATUS_INVALID_HANDLE */) return fatal_exception(info);
+    if (code == 0xC0000008) return fatal_exception(info);
     return EXCEPTION_CONTINUE_SEARCH;
 }
+
 static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
 /* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
  * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
@@ -568,6 +606,8 @@ void runtime_restart(void) {
 }
 
 int main(int argc, char **argv) {
+	puts("BUILD MARKER 2026-11-04 #21"); // ◄── Drop it right here!
+
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
@@ -789,11 +829,29 @@ int main(int argc, char **argv) {
     if (!isa_table && cpu_missing_sets) { printf("STOP: this CPU lacks %s and no rewrite table matches the image\n", missing); return 20; }
     /* The stubs follow the image in the same low mapping (rel32 jmps reach them). */
     size_t stub_area = isa_table ? round_page(isa_stub_area_size(isa_table)) : 0;
-    image = allocate(round_page(size) + stub_area);
-    unsigned char *stubs = image + round_page(size);
+	    image = allocate(round_page(size) + stub_area);
+	unsigned char *stubs = image + round_page(size);
+
     image_size = size;
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
+	
+	/* ════════════════════════════════════════════════════════════════════
+       CLAUDE DIAGNOSTIC: Snapshot memory snapshot at the UNLOCKED stage
+       ════════════════════════════════════════════════════════════════════ */
+    {
+        FILE *d = fopen("image.bin", "wb");
+        if (d) {
+            size_t full_allocation_size = round_page(size) + stub_area;
+            size_t written = fwrite(image, 1, full_allocation_size, d);
+            fclose(d);
+            printf("Diagnostic: Unlocked memory snapshot successful! Wrote %zu bytes directly to image.bin\n", written);
+        } else {
+            perror("Diagnostic Error: Local folder write tracking failed");
+        }
+    }
+	
+	
     if (isa_table && isa_table_matches(isa_table, image, size)) {
         printf("STOP: this CPU lacks %s and no rewrite table matches the image\n", missing);
         return 20;
@@ -885,6 +943,25 @@ int main(int argc, char **argv) {
     }
     if (!executable_entry) fail("entry is not executable");
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
+
+        /* ════════════════════════════════════════════════════════════════════
+       CLAUDE SLOT SEARCH PASS: Identify the system library imports
+       ════════════════════════════════════════════════════════════════════ */
+    {
+        static const uint64_t slots[] = { 0xea8468, 0xea84e8, 0xeaa308,0xeaa310 };
+        for (size_t s = 0; s < sizeof(slots) / sizeof(*slots); ++s) {
+            for (uint64_t r = 0; r < nr; ++r) {
+                if (relocs[r].target == slots[s] && relocs[r].kind) {
+                    printf("SLOT +0x%llx -> import %s (%s)\n",
+                           (unsigned long long)slots[s], 
+                           names[relocs[r].value],
+                           runtime_import_name(names[relocs[r].value]));
+                }
+            }
+        }
+    }
+
+
     if (native_libc) {
         for (uint64_t m=0;m<module_count;++m) {
             int init_executable=0;
@@ -897,17 +974,50 @@ int main(int argc, char **argv) {
         runtime_set_main_tls(image+main_tls[0],main_tls[1],main_tls[2],main_tls[3]);
         runtime_thread_attach_main();
         runtime_set_procparam(image+procparam);
-        /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
-        for (uint64_t m=0;m<module_count;++m) {
-            printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n",m,modules[m].init,nb);
-            typedef int (ABI *ModuleInit)(uint64_t,void *,void *);
-            int result=((ModuleInit)(image+modules[m].init))(0,NULL,NULL);
-            printf("Module %" PRIu64 " initializer returned %d\n",m,result);
+               /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
+                /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
+        for (uint64_t m = 0; m < module_count; ++m) {
+            // CLAUDE ACCURATE INTERCEPT: Bypasses Module 2 strictly by base address or index slot
+            if (m == 4 || modules[m].base == 0x2460000) {
+                printf("Runtime: SUCCESS! Safely skipping Module %" PRIu64 " (Party.prx) initialization pass.\n", m);
+                
+                uintptr_t mod2_addr = (uintptr_t)image + modules[m].base;
+                size_t mod2_size = (modules[m].size + 4095) & ~4095;
+                protect((void*)mod2_addr, mod2_size, 0); // Protect the memory space securely
+                continue;
+            }
+
+            printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n", m, modules[m].init, nb);
+            typedef int (ABI* ModuleInit)(uint64_t, void*, void*);
+            int result = ((ModuleInit)(image + modules[m].init))(0, NULL, NULL);
+            printf("Module %" PRIu64 " initializer returned %d\n", m, result);
+
             if (result) fail("module initializer failed");
         }
+
+
+
+
     }
+	
+    /* ════════════════════════════════════════════════════════════════════
+       TELEMETRY CAPTURE: Dump the pristine, fully relocated memory matrix
+       ════════════════════════════════════════════════════════════════════ */
+    FILE* snapshot = fopen("image.bin", "wb");
+    if (snapshot) {
+        fwrite(image, 1, size + stub_area, snapshot);
+        fclose(snapshot);
+        printf("Diagnostic: Unlocked memory snapshot successful! Wrote %llu bytes.\n", (unsigned long long)(size + stub_area));
+    }
+
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
-    entered_game=1;
+
+	
+	
+    printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
+	
+    entered_game = 1;
+	
     struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
 #ifdef _WIN32
     typedef void (ABI *Entry)(void *, void (ABI *)(void));

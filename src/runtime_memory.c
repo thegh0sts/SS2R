@@ -571,6 +571,38 @@ static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
     printf("Runtime: direct allocation offset=0x%" PRIx64 ", size=%" PRIu64 " bytes, type=%d\n", start, size, type);
     return 0;
 }
+
+/* sceKernelAvailableDirectMemorySize(start, end, alignment, *phys_out, *size_out):
+ * the largest free aligned range of direct memory within [start, end), from the same block list. */
+static ABI int32_t direct_available(int64_t low, int64_t high, uint64_t alignment,
+    int64_t* phys_out, uint64_t* size_out) {
+    if (!alignment) alignment = PAGE;
+    if (!phys_out || !size_out || low < 0 || high < 0 || !valid_alignment(alignment)) return INVALID;
+    uint64_t end = (uint64_t)high < POOL_SIZE ? (uint64_t)high : POOL_SIZE;
+    write_lock();
+    if (pool()) { write_unlock(); return NO_MEMORY; }
+    uint64_t pos = align_up((uint64_t)low, alignment), best = 0, best_pos = 0;
+    while (pos < end) {
+        int covered = 0;
+        for (int i = 0; i < LIMIT; ++i) {
+            Block b = blocks[i];
+            if (b.used && b.start <= pos && pos < b.start + b.size) {
+                pos = align_up(b.start + b.size, alignment); covered = 1; break;
+            }
+        }
+        if (covered) continue;
+        uint64_t next = end;
+        for (int i = 0; i < LIMIT; ++i)
+            if (blocks[i].used && blocks[i].start > pos && blocks[i].start < next) next = blocks[i].start;
+        if (next - pos > best) { best = next - pos; best_pos = pos; }
+        pos = align_up(next, alignment);
+    }
+    write_unlock();
+    if (!best) { *phys_out = 0; *size_out = 0; return NO_SPACE; }
+    *phys_out = (int64_t)best_pos; *size_out = best;
+    return 0;
+}
+
 static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
     if (!alignment) alignment=PAGE;
     if (!out || physical < 0 || (uint64_t)physical % PAGE || !size || size % PAGE || !valid_alignment(alignment) ||
@@ -811,7 +843,7 @@ static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
     return batch_map2(entries,count,processed,MAP_FIXED_FLAG);
 }
 static const RuntimeExport exports[]={
-    {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
+    {"sceKernelGetDirectMemorySize",direct_size},{ "sceKernelAvailableDirectMemorySize",direct_available }, {"sceKernelAllocateDirectMemory",direct_allocate},
     {"sceKernelMapDirectMemory",direct_map}, {"sceKernelMapNamedDirectMemory",direct_map_named},
     {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap}, {"munmap",direct_unmap},
     {"sceKernelMapFlexibleMemory",map_flexible}, {"sceKernelMapNamedFlexibleMemory",map_flexible_named},
