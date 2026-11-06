@@ -44,3 +44,4 @@ gpu/shim/bbport_gnm_table.inc
 /CUSA13795*/
 *.pkg
 /game
+/.vs
