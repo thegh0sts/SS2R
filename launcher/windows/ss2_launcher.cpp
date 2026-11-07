@@ -10,7 +10,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <winsock2.h>  // before windows.h
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <iphlpapi.h>
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -54,7 +57,10 @@ namespace {
 constexpr const wchar_t* kModules =
     L"libc.prx libSceFios2.prx libfmod.prx libPlayFabMultiplayer.prx Party.prx libSceNpToolkit2.prx "
     L"allobjs-orbis-x86_64.prx nvscript-orbis-x86_64.prx squirrel-orbis-x86_64.prx";
-constexpr const wchar_t* kWindowTitle = L"System Shock 2 Remastered - SS2R";
+#ifndef SS2R_VERSION
+#define SS2R_VERSION "dev"  // set by gpu/CMakeLists.txt from VERSION
+#endif
+constexpr const wchar_t* kWindowTitle = L"System Shock 2 Remastered - SS2R " SS2R_VERSION;
 
 // ---------------------------------------------------------------------------------------------
 // Text and file helpers
@@ -656,6 +662,8 @@ std::vector<Step> PrepareSteps() {
                game + OutArg() + L" --modules " + kModules),
         PyStep("Naming the remaining imports (gen_import_names.py)", a.root / L"tools" / L"gen_import_names.py", NamesArgs()),
         PyStep("Writing the content profile (content_profile.py)", a.root / L"scripts" / L"content_profile.py", game + OutArg()),
+        PyStep("Hiding the Online option in the menus (make_overrides.py)", a.root / L"scripts" / L"make_overrides.py",
+               game + L" --out " + Quote(a.out.wstring())),
     };
 }
 
@@ -690,7 +698,17 @@ constexpr Choice kPresentModes[] = {
     {"", "FIFO Relaxed", "FifoRelaxed"},
     {"", "Immediate (no VSync)", "Immediate"},
 };
+constexpr Choice kRenderResolutions[] = {
+    {"", "1080p", "1080"},
+    {"", "4K (2160p)", "2160"},
+};
+bool SetGameForce4k(bool on);  // with the Saves helpers, below
 constexpr int kFpsLimits[] = {0, 30, 60, 72, 90, 120, 144, 240};
+
+std::string CoopMode();  // Co-op settings, below
+std::string CoopDisplayName();
+std::string CoopPsnId();
+bool SetGameCvar(const std::string& name, std::string value);
 
 void StartGame() {
     App& a = g_app;
@@ -700,6 +718,22 @@ void StartGame() {
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
     SetEnv(L"BB_PRESENT_MODE", a.launcher.Get("present_mode", "Mailbox"));
     SetEnv(L"BB_LANGUAGE", a.launcher.Get("language", "1"));
+    {  // Render resolution: the engine's 4K switch and a matching 4K "TV"
+        const bool four_k = a.launcher.Get("render_resolution", "1080") == "2160";
+        SetEnv(L"BB_VIDEO_RES", four_k ? "3840x2160" : "");
+        if (!SetGameForce4k(four_k) && four_k)
+            a.notice = "4K takes effect from the next start (the game creates its settings file on the first one).";
+    }
+    {   // Co-op (Settings > Co-op): the runtime's network mode, the player name
+        const std::string mode = CoopMode();
+        const bool coop = mode != "off";
+        const std::string shown = CoopDisplayName();
+        SetEnv(L"BB_USER_NAME", shown);
+        SetEnv(L"BB_ONLINE_SERVER", coop ? "127.0.0.1" : "");
+        SetEnv(L"BB_ONLINE_ID", coop ? CoopPsnId() : "");
+        SetEnv(L"BB_ONLINE_ALLOW", mode == "join" ? a.launcher.Get("coop_join") : "");
+        if (!shown.empty()) SetGameCvar("net_player_name", shown);
+    }
     SetEnv(L"BB_MENU_LANGUAGE", "en");
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_PAD_DEADZONE", a.launcher.Get("pad_deadzone"));
@@ -1689,6 +1723,8 @@ void PlayTab() {
     DrawLog();
 }
 
+void CoopSettings();  // below
+
 void SettingsTab() {
     App& a = g_app;
     ImGui::TextColored(kGrey, "Applied when you press Play. The in-game menu (Insert or L3+R3) changes the same settings.");
@@ -1737,6 +1773,10 @@ void SettingsTab() {
             ImGui::EndCombo();
         }
     }
+    LauncherChoice("Render resolution", "render_resolution", kRenderResolutions, "1080", 14.0f);
+    HelpMarker("The resolution the game draws at. 4K uses the engine's own PS4 Pro 4K mode: much sharper, "
+               "and still worth it on a 1080p or 1440p monitor (it is scaled down, like supersampling). "
+               "Needs a stronger GPU.");
     LauncherChoice("Presentation", "present_mode", kPresentModes, "Mailbox", 14.0f);
     HelpMarker("Mailbox: smooth without tearing. FIFO: classic VSync. Immediate: lowest latency, may tear.");
     {
@@ -1745,11 +1785,13 @@ void SettingsTab() {
         HelpMarker("Shows an interpolated frame between each pair of game frames. Experimental, and untested "
                    "with System Shock 2: turn it off if you see artefacts.");
     }
-    ImGui::TextColored(kGrey, "Upscaling (FSR/DLSS), internal resolution and ultrawide are tied to Crash Team "
-                              "Racing's shaders and patches in this loader, so they are not offered here yet.");
+    ImGui::TextColored(kGrey, "Upscaling (FSR/DLSS) is not offered yet: for the sharpest picture, use "
+                              "Render resolution 4K.");
 
     Section("Controller");
     ImGui::TextColored(kGrey, "%s  Controllers, players and buttons are in the Controls tab.", ICON_GAMEPAD);
+
+    CoopSettings();
 
     Section("Console");
     LauncherChoice("Game language", "language", kGameLanguages, "1", 14.0f);
@@ -2890,6 +2932,7 @@ void ClearShaderCache() {
 }
 
 std::string BuildVersion() {
+    if (std::strcmp(SS2R_VERSION, "dev") != 0) return SS2R_VERSION;
     for (const fs::path& p : {g_app.root / L"VERSION", g_app.out / L"VERSION"}) {
         const std::string v = Trim(ReadText(p));
         if (!v.empty()) return v.substr(0, v.find('\n'));
@@ -3169,6 +3212,235 @@ void MergeSection() {
             ImGui::SameLine();
             ImGui::TextColored(kGrey, "into %s", PathText(MergeTarget()).c_str());
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Render resolution: kexEngine's own 4K switch (gnm_force4k) lives in the game's settings file,
+// <save root>\SAVEDATA\kexengine.cfg, which the game writes on its first start.
+
+/// Sets  seta gnm_force4k "1"/"0"  in kexengine.cfg; false when the game has not made the file yet.
+bool SetGameForce4k(bool on) {
+    const fs::path cfg = SaveRoot() / L"SAVEDATA" / L"kexengine.cfg";
+    if (!IsFile(cfg)) return false;
+    std::string text = ReadText(cfg);
+    const std::string line = std::string("seta gnm_force4k \"") + (on ? "1" : "0") + "\"";
+    size_t at = 0;
+    bool found = false;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        if (text.compare(at, 17, "seta gnm_force4k ") == 0) {
+            const size_t stop = (end > at && text[end - 1] == '\r') ? end - 1 : end;
+            if (text.compare(at, stop - at, line) == 0) return true;  // already so
+            text.replace(at, stop - at, line);
+            found = true;
+            break;
+        }
+        at = end + 1;
+    }
+    if (!found) {
+        if (!text.empty() && text.back() != '\n') text += '\n';
+        text += line + "\n";
+    }
+    return WriteTextAtomic(cfg, text);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Co-op (Settings), v2: Off / Host / Join, the player name, this PC's addresses (Host) and the
+// host's address (Join). At PLAY (StartGame) they become, for the game:
+//   Host or Join  -> BB_ONLINE_SERVER=127.0.0.1  (runtime_net.c: network on, real sockets, PSN in)
+//   Player name   -> BB_USER_NAME (the console user name the game shows), BB_ONLINE_ID (PSN name),
+//                    seta net_player_name "..." in kexengine.cfg
+//   Join address  -> BB_ONLINE_ALLOW (runtime_net.c may send there; LAN and VPN ranges need nothing)
+// The host needs no list of joiners: the runtime answers whoever sent it a packet first.
+
+/// Sets  seta <name> "<value>"  in kexengine.cfg; false when the game has not made the file yet.
+bool SetGameCvar(const std::string& name, std::string value) {
+    const fs::path cfg = SaveRoot() / L"SAVEDATA" / L"kexengine.cfg";
+    if (!IsFile(cfg)) return false;
+    value.erase(std::remove(value.begin(), value.end(), '"'), value.end());
+    std::string text = ReadText(cfg);
+    const std::string prefix = "seta " + name + " ";
+    const std::string line = prefix + "\"" + value + "\"";
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        if (text.compare(at, prefix.size(), prefix) == 0) {
+            const size_t stop = (end > at && text[end - 1] == '\r') ? end - 1 : end;
+            if (text.compare(at, stop - at, line) == 0) return true;
+            text.replace(at, stop - at, line);
+            return WriteTextAtomic(cfg, text);
+        }
+        at = end + 1;
+    }
+    if (!text.empty() && text.back() != '\n') text += '\n';
+    return WriteTextAtomic(cfg, text + line + "\n");
+}
+
+/// "off", "host" or "join" (a v1 launcher's "coop" checkbox counts as host).
+std::string CoopMode() {
+    std::string mode = g_app.launcher.Get("coop_mode");
+    if (mode.empty()) mode = g_app.launcher.Flag("coop", false) ? "host" : "off";
+    return mode == "host" || mode == "join" ? mode : "off";
+}
+
+/// The name the game shows: printable ASCII, at most 16 characters; empty keeps the default ("Player 1").
+std::string CoopDisplayName() {
+    std::string out;
+    for (char c : g_app.launcher.Get("coop_name"))
+        if (c >= 0x20 && c < 0x7f && out.size() < 16) out += c;
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    while (!out.empty() && out.front() == ' ') out.erase(out.begin());
+    return out;
+}
+
+/// The PSN online ID: 3-16 of A-Z a-z 0-9 - _ from the display name (spaces become _).
+std::string CoopPsnId() {
+    std::string out;
+    for (char c : CoopDisplayName()) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') out += c;
+        else if (c == ' ') out += '_';
+    }
+    if (out.empty()) return "Player";
+    while (out.size() < 3) out += '_';
+    return out;
+}
+
+bool IsIPv4(const std::string& text) {
+    in_addr addr{};
+    return !text.empty() && inet_pton(AF_INET, text.c_str(), &addr) == 1;
+}
+
+struct LocalAddress {
+    std::string ip, adapter;
+};
+
+/// This PC's IPv4 addresses on adapters that are up (LAN, Wi-Fi, VPNs), loopback left out.
+std::vector<LocalAddress> ScanLocalAddresses() {
+    std::vector<LocalAddress> list;
+    ULONG size = 32 * 1024;
+    std::vector<unsigned char> buffer(size);
+    auto* first = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+    const ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG result = GetAdaptersAddresses(AF_INET, flags, nullptr, first, &size);
+    if (result == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(size);
+        first = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+        result = GetAdaptersAddresses(AF_INET, flags, nullptr, first, &size);
+    }
+    if (result != NO_ERROR) return list;
+    for (auto* ad = first; ad; ad = ad->Next) {
+        if (ad->OperStatus != IfOperStatusUp || ad->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        for (auto* u = ad->FirstUnicastAddress; u; u = u->Next) {
+            if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
+            char text[64] = "";
+            const auto* in = reinterpret_cast<const sockaddr_in*>(u->Address.lpSockaddr);
+            if (!inet_ntop(AF_INET, &in->sin_addr, text, sizeof text)) continue;
+            if (!std::strncmp(text, "169.254.", 8)) continue;  // no network yet (self-assigned)
+            list.push_back({text, ad->FriendlyName ? Narrow(ad->FriendlyName) : std::string()});
+        }
+    }
+    return list;
+}
+
+void CoopSettings() {
+    App& a = g_app;
+    Section("Co-op");
+    static char name[32];
+    static char join[64];
+    static std::vector<LocalAddress> addresses;
+    static bool loaded = false;
+    if (!loaded) {
+        loaded = true;
+        std::snprintf(name, sizeof name, "%s", a.launcher.Get("coop_name").c_str());
+        std::snprintf(join, sizeof join, "%s", a.launcher.Get("coop_join").c_str());
+        addresses = ScanLocalAddresses();
+    }
+
+    const std::string mode = CoopMode();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Mode");
+    ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
+    for (const char* m : {"off", "host", "join"}) {
+        const char* label = !std::strcmp(m, "off") ? "Off" : !std::strcmp(m, "host") ? "Host" : "Join";
+        if (std::strcmp(m, "off")) ImGui::SameLine();
+        if (ImGui::RadioButton(label, mode == m)) {
+            a.launcher.Set("coop_mode", m);
+            SaveLauncher();
+            if (!std::strcmp(m, "host")) addresses = ScanLocalAddresses();
+        }
+    }
+    HelpMarker("Host or Join switch the network on for the game's LAN co-op (Multiplayer > LAN). Off: "
+               "the game sees no network.");
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Player name");
+    ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    if (ImGui::InputTextWithHint("##coop_name", "Player 1", name, 17)) {
+        a.launcher.Set("coop_name", name);
+        SaveLauncher();
+    }
+    HelpMarker("The name the game shows (lobby, co-op), up to 16 characters. Empty: \"Player 1\".");
+
+    if (mode == "host") {
+        const std::string chosen = a.launcher.Get("coop_host_addr");
+        const LocalAddress* selected = nullptr;
+        for (const auto& addr : addresses)
+            if (addr.ip == chosen) selected = &addr;
+        if (!selected && !addresses.empty()) selected = &addresses.front();
+        auto label = [](const LocalAddress& addr) {
+            return addr.ip + (addr.adapter.empty() ? "" : "   (" + addr.adapter + ")");
+        };
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Your address");
+        ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 20.0f);
+        if (ImGui::BeginCombo("##coop_host_addr", selected ? label(*selected).c_str() : "no network found")) {
+            for (const auto& addr : addresses) {
+                if (ImGui::Selectable(label(addr).c_str(), selected == &addr)) {
+                    a.launcher.Set("coop_host_addr", addr.ip);
+                    SaveLauncher();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Rescan")) addresses = ScanLocalAddresses();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!selected);
+        if (ImGui::Button("Copy IP") && selected) {
+            ImGui::SetClipboardText(selected->ip.c_str());
+            a.notice = "Copied " + selected->ip + " to the clipboard.";
+        }
+        ImGui::EndDisabled();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(kGrey, "Friends join with: Multiplayer > LAN > Join game by IP > %s",
+                           selected ? selected->ip.c_str() : "your address");
+        ImGui::TextColored(kGrey, "%s", "Over the internet: use a VPN (Tailscale, ZeroTier, Radmin) and share its "
+                                        "address, or forward UDP port 5069 on your router to this PC and share your "
+                                        "public IP (search \"what is my IP\"). Allow SS2R through Windows Firewall.");
+        ImGui::PopTextWrapPos();
+    } else if (mode == "join") {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Host's address");
+        ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+        if (ImGui::InputTextWithHint("##coop_join", "e.g. 100.101.7.33", join, sizeof join,
+                                     ImGuiInputTextFlags_CharsNoBlank)) {
+            a.launcher.Set("coop_join", join);
+            SaveLauncher();
+        }
+        ImGui::SameLine();
+        if (!join[0]) ImGui::TextColored(kGrey, "%s", "(the IP the host sent you)");
+        else if (IsIPv4(join)) ImGui::TextColored(kGreen, "%s", "valid");
+        else ImGui::TextColored(kRed, "%s", "not an IPv4 address");
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(kGrey, "In game: Multiplayer > LAN > Join game by IP > %s",
+                           join[0] ? join : "the host's address");
+        ImGui::PopTextWrapPos();
     }
 }
 

@@ -145,6 +145,19 @@ static int translate(const char *guest,char *out,size_t size) {
     if (!m) result=ENOENT;
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
     pthread_mutex_unlock(&lock);
+    /* SS2R: the engine loads an optional sshock2ee-patch1.kpf after its other archives (absent in
+     * update 1.04). ss2r-overrides.kpf, made by Prepare from the player's own base.kpf, stands in
+     * for it: the multiplayer menus without the Online (PlayFab) option. A real patch1 wins. */
+    if (!result && !strncmp(buffer,"/app0/",6)) {
+        static const char want[]="/sshock2ee-patch1.kpf";
+        const size_t have=strlen(buffer), wl=sizeof(want)-1;
+        if (have>=wl && !strcmp(buffer+have-wl,want) && access(out,F_OK) &&
+            !access("ss2r-overrides.kpf",F_OK) && !getenv("BB_NO_OVERRIDES")) {
+            snprintf(out,size,"%s","ss2r-overrides.kpf");
+            static int told;
+            if (!told) { told=1; printf("Runtime: %s -> ss2r-overrides.kpf (SS2R menu overrides)\n",guest); }
+        }
+    }
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     /* BB_FILE_TRACE=1: every guest path the game opens, stats or checks (mods, missing files). */
     static int trace=-1;

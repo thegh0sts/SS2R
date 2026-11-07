@@ -252,6 +252,17 @@ static ABI int32_t user_event_unregister(void) { return 0; }
 static ABI int32_t netctl_init(void) { return 0; }
 static ABI int32_t netctl_term(void) { return 0; }
 static ABI int32_t resolver_abort(int32_t rid,int32_t flags) { (void)rid; (void)flags; return 0; }
+/* SS2R: the on-screen keyboard's panel size, asked before it opens (any reasonable size). */
+static ABI int32_t ime_panel_size(const void *param,uint32_t *width,uint32_t *height) {
+    (void)param;
+    if (width) *width=800;
+    if (height) *height=400;
+    return 0;
+}
+static ABI int32_t ime_panel_size_ext(const void *param,const void *extended,uint32_t *width,uint32_t *height) {
+    (void)extended;
+    return ime_panel_size(param,width,height);
+}
 /* ImeDialog: text typed on the keyboard into the game window (title bar shows it).
  * OrbisImeDialogParam: user, type, languages(8), enter label, method, filter,
  * option, max length, char16 buffer, position, alignment, placeholder, title. */
@@ -976,7 +987,7 @@ static const RuntimeExport exports[]={
     {"sceNpCommerceDialogInitialize",commerce_init}, {"sceNpCommerceDialogOpen",commerce_open},
     {"sceNpCommerceDialogUpdateStatus",commerce_status}, {"sceNpCommerceDialogTerminate",commerce_term},
     {"sceImeDialogInit",ime_init}, {"sceImeDialogGetStatus",ime_status}, {"sceImeDialogGetResult",ime_result},
-    {"sceImeDialogTerm",ime_term}, {"sceImeDialogAbort",ime_term},
+    {"sceImeDialogTerm",ime_term}, {"sceImeDialogAbort",ime_term}, {"sceImeDialogGetPanelSize",ime_panel_size}, {"sceImeDialogGetPanelSizeExtended",ime_panel_size_ext},
     {"sceNpTrophyCreateContext",trophy_context}, {"sceNpTrophyCreateHandle",trophy_handle},
     {"sceNpTrophyRegisterContext",trophy_register}, {"sceNpTrophyUnlockTrophy",trophy_unlock},
     {"sceNpTrophyGetGameInfo",trophy_game_info}, {"sceNpTrophyGetTrophyInfo",trophy_info},

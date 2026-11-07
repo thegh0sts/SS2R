@@ -333,3 +333,26 @@ endif()  # ss2r_icon.rc
 if(TARGET ss2-launcher)
     set_property(TARGET ss2-launcher APPEND PROPERTY LINK_LIBRARIES bcrypt windowscodecs)
 endif()
+
+# SS2R launcher, Co-op v2: this PC's addresses (GetAdaptersAddresses, Winsock).
+if(TARGET ss2-launcher)
+    set_property(TARGET ss2-launcher APPEND PROPERTY LINK_LIBRARIES ws2_32 iphlpapi)
+endif()
+
+# SS2R version: the VERSION file at the project root (reconfigures when it changes).
+set(SS2R_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SS2R_VERSION_FILE}")
+if(EXISTS "${SS2R_VERSION_FILE}")
+    file(STRINGS "${SS2R_VERSION_FILE}" SS2R_VERSION LIMIT_COUNT 1)
+    string(STRIP "${SS2R_VERSION}" SS2R_VERSION)
+endif()
+if(NOT SS2R_VERSION)
+    set(SS2R_VERSION "dev")
+endif()
+foreach(target sacredfire ss2-launcher)
+    if(TARGET ${target})
+        target_compile_definitions(${target} PRIVATE SS2R_VERSION="${SS2R_VERSION}")
+    endif()
+endforeach()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/../VERSION" "${SS2R_VERSION}\n")  # out/VERSION, for package.sh
+message(STATUS "SS2R version ${SS2R_VERSION}")

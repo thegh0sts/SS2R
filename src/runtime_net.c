@@ -645,7 +645,11 @@ static void dw_test_key_ensure(void) {
             }
         }
     }
-    /* BB_DW_HANDLER_81_CRYPTO_CALL=1: force the crypto core call (0x1b060) in     * the 0x81 handler to return success (AL=1) without actually running it.     * The crypto core validates tickets with RSA/DH; our dummy tickets fail.     * Replacing the call at 0x1b9c3 (5 bytes) with mov al,1; nop*3 lets the     * handler proceed to send the 8-byte response which sets mode=2. */
+    /* BB_DW_HANDLER_81_CRYPTO_CALL=1: force the crypto core call (0x1b060) in
+     * the 0x81 handler to return success (AL=1) without actually running it.
+     * The crypto core validates tickets with RSA/DH; our dummy tickets fail.
+     * Replacing the call at 0x1b9c3 (5 bytes) with mov al,1; nop*3 lets the
+     * handler proceed to send the 8-byte response which sets mode=2. */
     {
         const char *h81=getenv("BB_DW_HANDLER_81_CRYPTO_CALL");
         if (h81 && !strcmp(h81,"1") && !dw_handler_81_crypto_call_applied) {
@@ -752,9 +756,38 @@ static void configure(void) {
 }
 static int online(void) { pthread_once(&cfg_once,configure); return cfg.on; }
 
+/* SS2R co-op: an address that sent the game a packet may be answered, so a host needs no list of
+ * joiners (they still need the host's address when it is on the internet). */
+static pthread_mutex_t peers_lock=PTHREAD_MUTEX_INITIALIZER;
+static uint32_t peers[64];
+static int peer_count;
+static int known_peer(uint32_t addr) {
+    int found=0;
+    pthread_mutex_lock(&peers_lock);
+    for (int i=0;i<peer_count && !found;++i) found=peers[i]==addr;
+    pthread_mutex_unlock(&peers_lock);
+    return found;
+}
+static void learn_peer(uint32_t addr) {
+    if (!addr || known_peer(addr)) return;
+    pthread_mutex_lock(&peers_lock);
+    const int added=peer_count<64;
+    if (added) peers[peer_count++]=addr;
+    pthread_mutex_unlock(&peers_lock);
+    char text[32];
+    ip_text(addr,text,sizeof text);
+    if (added) printf("Net: %s contacted us; it may be answered\n",text);
+}
 /* Where the game may connect or send: the server, loopback, BB_ONLINE_ALLOW. */
 static int allowed(uint32_t addr) {
     if (addr==cfg.server || (ntohl(addr)>>24)==127) return 1;
+    {   /* SS2R LAN co-op: the local network, multicast and broadcast (no internet hosts) */
+        const uint32_t h=ntohl(addr);
+        if ((h>>24)==10 || (h>>20)==0xAC1 || (h>>16)==0xC0A8 || (h>>16)==0xA9FE) return 1;
+        if ((h>>22)==0x191 || (h>>24)==26) return 1;  /* Tailscale 100.64/10, Radmin VPN 26/8 */
+        if (known_peer(addr)) return 1;  /* it contacted us first */
+        if ((h>>28)==0xE || h==0xFFFFFFFFu || (h&0xFF)==0xFF) return 1;
+    }
     for (int i=0;i<cfg.allow_count;++i) if (cfg.allow[i]==addr) return 1;
     return 0;
 }
@@ -1137,6 +1170,8 @@ static ABI int32_t net_recvfrom(int id,void *data,uint64_t size,int flags,void *
     socklen_t from_len=sizeof from;
     memset(&from,0,sizeof from);
     const int n=recvfrom(o->s,data,(int)size,native_flags(flags & ~PS_MSG_WAITALL),(struct sockaddr *)&from,&from_len);
+    if (n>0 && ((struct sockaddr *)&from)->sa_family==AF_INET && online())
+        learn_peer(((struct sockaddr_in *)&from)->sin_addr.s_addr);
     if (n<0) {
 #ifdef _WIN32
         /* A UDP reply "port unreachable" resets the socket on Windows: report it as nothing. */
@@ -1205,7 +1240,20 @@ static ABI int32_t net_setsockopt(int id,int level,int option,const void *value,
     } else if (level==0) {
         if (option==3) { native_level=IPPROTO_IP; native_option=IP_TOS; }
         else if (option==4) { native_level=IPPROTO_IP; native_option=IP_TTL; }
-        else return 0;
+        /* SS2R LAN: multicast, same numbers and structures on the PS4 (BSD) and Windows:
+         * 9 IP_MULTICAST_IF (in_addr), 10 TTL, 11 LOOP, 12/13 ADD/DROP_MEMBERSHIP (ip_mreq). */
+        else if (option==9 || option==12 || option==13) {
+            printf("Net: setsockopt %d '%s' IP option %d (multicast, %u bytes)\n",id,o->name,option,len);
+            return setsockopt(o->s,IPPROTO_IP,option,(const char *)value,(int)len) ? fail(native_error()) : 0;
+        }
+        else if (option==10 || option==11) {
+            printf("Net: setsockopt %d '%s' IP option %d = %d (multicast)\n",id,o->name,option,v);
+            native_level=IPPROTO_IP; native_option=option;
+        }
+        else {
+            printf("Net: setsockopt %d '%s' IP option %d accepted (not passed on)\n",id,o->name,option);
+            return 0;
+        }
     } else {
         printf("Net: setsockopt %d '%s' level %d option 0x%x accepted (unknown)\n",id,o->name,level,option);
         return 0;
@@ -2072,6 +2120,13 @@ static int64_t posix_result(int64_t r) {
     return -1;
 }
 static ABI int32_t posix_socket(int family,int type,int protocol) { return (int32_t)posix_result(net_socket("posix",family,type,protocol)); }
+/* SS2R: the engine's LAN lobby (udpService.cpp) polls recvfrom and answers with sendto. */
+static ABI int64_t posix_recvfrom(int s,void *data,uint64_t size,int flags,void *addr,uint32_t *len) {
+    return (int64_t)posix_result(net_recvfrom(s,data,size,flags,addr,len));
+}
+static ABI int64_t posix_sendto(int s,const void *data,uint64_t size,int flags,const void *addr,uint32_t len) {
+    return (int64_t)posix_result(net_sendto(s,data,size,flags,addr,len));
+}
 static ABI int32_t posix_connect(int s,const void *addr,uint32_t len) { return (int32_t)posix_result(net_connect(s,addr,len)); }
 static ABI int32_t posix_bind(int s,const void *addr,uint32_t len) { return (int32_t)posix_result(net_bind(s,addr,len)); }
 static ABI int32_t posix_listen(int s,int backlog) { return (int32_t)posix_result(net_listen(s,backlog)); }
@@ -2225,7 +2280,7 @@ static const RuntimeExport exports[]={
     {"sceNpWebApiRegisterExtdPushEventCallbackA",webapi_register_push},
     {"sceNpWebApiUnregisterExtdPushEventCallback",ok_void},
     {"sceNpWebApiUtilityParseNpId",webapi_parse_npid},
-    {"socket",posix_socket}, {"connect",posix_connect}, {"bind",posix_bind}, {"listen",posix_listen},
+    {"socket",posix_socket}, {"recvfrom",posix_recvfrom}, {"sendto",posix_sendto}, {"connect",posix_connect}, {"bind",posix_bind}, {"listen",posix_listen},
     {"accept",posix_accept}, {"send",posix_send}, {"recv",posix_recv}, {"setsockopt",posix_setsockopt},
     {"select",posix_select}, {"inet_pton",posix_inet_pton}, {"inet_ntop",posix_inet_ntop},
 };

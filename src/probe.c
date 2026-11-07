@@ -1,3 +1,6 @@
+#ifndef SS2R_VERSION
+#define SS2R_VERSION "dev"
+#endif
 /* Minimal x86-64 native loader experiment. Not a PS4 emulator or game port. */
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -606,6 +609,7 @@ void runtime_restart(void) {
 }
 
 int main(int argc, char **argv) {
+	printf("SS2R %s\n", SS2R_VERSION);
 	puts("BUILD MARKER 2026-11-04 #25"); // ◄── Drop it right here!
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -867,7 +871,12 @@ int main(int argc, char **argv) {
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
         char icon[4200];
         snprintf(icon,sizeof(icon),"%s/sce_sys/icon0.png",app0);
-        BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,icon};
+        /* BB_VIDEO_RES=WxH: the video-out ("TV") size the game renders for; 1920x1080 by default. */
+        uint32_t video_w=1920, video_h=1080;
+        { const char *res=getenv("BB_VIDEO_RES"); unsigned w=0, h=0;
+          if (res && sscanf(res,"%ux%u",&w,&h)==2 && w>=640 && h>=360 && w<=7680 && h<=4320) { video_w=w; video_h=h; }
+          printf("Video out: %ux%u%s\n",video_w,video_h,res ? " (BB_VIDEO_RES)" : ""); }
+        BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,video_w,video_h,icon};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());
