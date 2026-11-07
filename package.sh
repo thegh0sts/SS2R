@@ -42,7 +42,7 @@ for exe in out/SS2R.exe out/bb-gpu-capabilities.exe out/SS2R-Launcher.exe; do
 done | { grep -viE '^/c/windows/' || true; } | sort -u | while read -r dll; do
     cp -n "$dll" "$DIST/bin/"
 done
-dlls=$(ls "$DIST"/bin/*.dll 2>/dev/null | wc -l)
+dlls=$(find "$DIST/bin" -maxdepth 1 -iname "*.dll" | wc -l)
 # The Vulkan loader is normally installed with the graphics driver; ship ours only as a fallback.
 [ -f "$DIST/bin/vulkan-1.dll" ] || { [ -f out/vulkan-1.dll ] && cp out/vulkan-1.dll "$DIST/bin/"; } || true
 
@@ -76,30 +76,54 @@ done
 [ -f out/VERSION ] && cp out/VERSION "$DIST/"
 
 cat > "$DIST/README-Windows.md" <<'EOF'
-# System Shock 2: 25th Anniversary Remaster (SS2R), native PC loader
+# SS2R: System Shock 2 25th Anniversary Remaster on Windows
 
-This package does **not** contain the game. You need your own PS4 copy, dumped from your console.
+Runs the PS4 version of System Shock 2: 25th Anniversary Remaster natively on Windows.
+
+This package does **not** contain the game. You need your own PS4 copy (base game and update 1.04),
+dumped from your own console.
+
+## Requirements
+
+- Windows 10 or 11, 64-bit
+- A GPU with Vulkan 1.3 and an up-to-date driver
+- Your PS4 dumps of the base game and update 1.04
 
 ## Setup (once)
 
-1. Prepare a game folder: the base game with update 1.04 copied over it. It must contain
-   `eboot.bin`, `base.kpf`, `sce_sys\`, `sce_module\` and `prx\`, plus the script modules
-   (`allobjs-orbis-x86_64.prx`, `nvscript-orbis-x86_64.prx`, `squirrel-orbis-x86_64.prx`).
-2. Run `SS2R-Launcher.exe`, click **Choose...** and pick that folder. All checks should say OK.
+1. Run `SS2R-Launcher.exe`.
+2. Game folder, either:
+   - **Already merged** (update 1.04 copied over the base game): click **Choose...** and pick it, or
+   - **Separate dumps:** open *"No merged folder yet? Merge the base game and the update"*, choose
+     both and click **Merge**. The merged folder is made next to the base game (no extra space on
+     the same drive) and chosen for you.
 3. Click **Prepare**. It builds `bin\boot-linked.bin` and the other prepared files from your game.
+   Run it again only after choosing a different game folder or updating SS2R.
 
 ## Playing
 
-Click **PLAY** in the launcher. Settings and Controls are in their tabs; the in-game menu
-(Insert, or L3+R3 on a controller) changes the same settings.
+Click **PLAY**. Graphics and controls are in the Settings and Controls tabs; the in-game overlay
+(Insert, or L3+R3 on a controller) changes the same settings while you play.
 
-Your settings (`bin\bbport.ini`) and saves (`bin\user\`) stay in this folder: keep them when
-you update to a newer release.
+- **Saves** tab: back up, export, import and restore your saves.
+- **Trophies** tab: your trophies as you earn them. Their names are encrypted in the game; paste
+  your PS4 trophy key (or import it from shadPS4) to see them.
+
+## Updating SS2R
+
+Your settings (`bin\bbport.ini`, `bin\ss2_launcher.ini`), saves (`bin\user\`) and backups
+(`backups\`) live in this folder. To update, copy those into the new version's folder, then press
+**Prepare** once.
 
 ## Problems
 
-Each run's output is in `bin\run.txt`. The launcher shows the last error in red;
-"Copy last STOP" copies it for a bug report.
+Each run's output is in `bin\run.txt`. The launcher shows the last error in red. Clearing the shader
+cache (Tools tab) helps after a GPU driver update or with graphics glitches.
+
+## Licence
+
+SS2R is free software under the GNU GPL v2 or later; see `licenses\`. Not affiliated with Nightdive
+Studios or Sony Interactive Entertainment.
 EOF
 
 size=$(du -sh "$DIST" | cut -f1)
@@ -107,4 +131,17 @@ echo "Packaged $PWD/$DIST ($size, $dlls DLLs in bin)"
 echo "Contents check: no game files"
 if find "$DIST" -iname 'eboot.bin' -o -iname '*.prx' -o -iname 'boot*.bin' -o -iname 'image.bin' | grep -q .; then
     echo "ERROR: game-derived files found in $DIST"; exit 1
+fi
+
+# A zip for sharing, named after the version when there is one.
+ver=$(head -n1 "$DIST/VERSION" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+zipname="SS2R${ver:+-$ver}.zip"
+rm -f "dist/$zipname"
+if command -v zip >/dev/null; then
+    (cd dist && zip -qr "$zipname" SS2R) && echo "Zip: $PWD/dist/$zipname"
+elif command -v powershell.exe >/dev/null; then
+    powershell.exe -NoProfile -Command "Compress-Archive -Path '$(cygpath -w "$DIST")' -DestinationPath '$(cygpath -w "dist/$zipname")'" \
+        && echo "Zip: $PWD/dist/$zipname"
+else
+    echo "No zip tool: right-click dist\\SS2R > Send to > Compressed (zipped) folder"
 fi
