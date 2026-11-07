@@ -1,10 +1,6 @@
-<p align="center">
-  <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
-</p>
+# System Shock 2: 25th Anniversary Remaster (& Recomp'd)
 
-# CTR-NitroFueled-PC
-
-**Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11.**
+**System Shock 2: 25th Anniversary Remaster (PS4, CUSA51878 v1.04) running natively on Windows 10/11.**
 
 This is a Windows fork of [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire), the native
 Linux port of the game by T3CHNOLOG1C. The game's own x86-64 code runs directly on the CPU, a
