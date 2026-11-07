@@ -237,7 +237,7 @@ if (WIN32)
     add_executable(sacredfire ../src/probe.c ${BB_RUNTIME} ../src/compat_win.c ../src/cpu_check.c ../src/vulkan_smoke.c
         ../src/isa_rewrite.c ../src/isa_emulate.c
         ../packaging/windows/sacredfire.rc)
-    set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+    set_target_properties(sacredfire PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF OUTPUT_NAME SS2R)
     # isa_emulate runs inside guest code: no XMM/YMM.
     set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
     # Newer clang (MSYS2) warns about write-only counters kept for diagnostics.
@@ -252,11 +252,11 @@ if (WIN32)
     target_link_libraries(bb-gpu-capabilities PRIVATE Vulkan::Vulkan PkgConfig::SDL3)
     # The launcher (CTR-NitroFueled-PC.exe, launcher/windows): Dear ImGui on Win32 + Direct3D 11,
     # linked statically, so the .exe next to run.py needs no DLL from bin\.
-    add_executable(ss2-launcher WIN32 ../launcher/windows/ss2_launcher.cpp
+    add_executable(ss2-launcher WIN32 ../launcher/windows/ss2_launcher.cpp ../launcher/windows/gamepads.cpp
         third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp third_party/imgui/imgui_tables.cpp
         third_party/imgui/imgui_widgets.cpp third_party/imgui/backends/imgui_impl_win32.cpp
         third_party/imgui/backends/imgui_impl_dx11.cpp)
-    target_include_directories(ss2-launcher PRIVATE third_party/imgui third_party/imgui/backends)
+    target_include_directories(ss2-launcher PRIVATE third_party/imgui third_party/imgui/backends ${SDL3_INCLUDE_DIRS})
     target_compile_definitions(ss2-launcher PRIVATE UNICODE _UNICODE)
     target_link_options(ss2-launcher PRIVATE -static -municode -s)
     target_link_libraries(ss2-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi ole32 shell32 uuid)
@@ -309,3 +309,27 @@ add_executable(fsr4-bench EXCLUDE_FROM_ALL tools/fsr4_bench.cpp
     shadps4/video_core/renderer_vulkan/fsr411/fsr411.cpp)
 target_include_directories(fsr4-bench PRIVATE shadps4/video_core/renderer_vulkan/fsr411)
 target_link_libraries(fsr4-bench PRIVATE ffx-vulkan::fsr4-v07-vulkan ffx-vulkan::fsr4-v07-assets Vulkan::Vulkan)
+
+# SS2R: the executables' icons (res/SS2R.ico, res/SS2R-Launcher.ico). Icon 1 is the one Windows shows.
+if(WIN32)
+    enable_language(RC)
+    set(SS2R_RES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../res")
+    foreach(pair "ss2-launcher|SS2R-Launcher")  # SS2R.exe: packaging/windows/sacredfire.rc
+        string(REPLACE "|" ";" pair "${pair}")
+        list(GET pair 0 target)
+        list(GET pair 1 icon)
+        if(TARGET ${target} AND EXISTS "${SS2R_RES_DIR}/${icon}.ico")
+            set(rc "${CMAKE_CURRENT_BINARY_DIR}/${icon}_icon.rc")
+            file(WRITE "${rc}" "1 ICON \"${SS2R_RES_DIR}/${icon}.ico\"\n")
+            target_sources(${target} PRIVATE "${rc}")
+            set_property(SOURCE "${rc}" APPEND PROPERTY OBJECT_DEPENDS "${SS2R_RES_DIR}/${icon}.ico")
+        elseif(TARGET ${target})
+            message(WARNING "No icon for ${target}: ${SS2R_RES_DIR}/${icon}.ico not found")
+        endif()
+    endforeach()
+endif()  # ss2r_icon.rc
+
+# SS2R launcher, Trophies tab: AES (bcrypt) for the trophy texts, WIC (windowscodecs) for the icons.
+if(TARGET ss2-launcher)
+    set_property(TARGET ss2-launcher APPEND PROPERTY LINK_LIBRARIES bcrypt windowscodecs)
+endif()

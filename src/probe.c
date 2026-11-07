@@ -606,7 +606,7 @@ void runtime_restart(void) {
 }
 
 int main(int argc, char **argv) {
-	puts("BUILD MARKER 2026-11-04 #21"); // ◄── Drop it right here!
+	puts("BUILD MARKER 2026-11-04 #25"); // ◄── Drop it right here!
 
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifndef _WIN32
@@ -772,7 +772,7 @@ int main(int argc, char **argv) {
             LinkedModule *x=&modules[m];
             if (x->base>=size || !x->size || x->size>size-x->base || x->init<x->base || x->init-x->base>=x->size ||
                 (x->tls_module && (x->tls_address>=size || x->tls_memsz>size-x->tls_address || x->tls_memsz>1024*1024 ||
-                                   x->tls_filesz>x->tls_memsz || x->tls_module<2 || x->tls_module>7)))
+                                   x->tls_filesz>x->tls_memsz || x->tls_module<2 || x->tls_module>15)))
                 fail("invalid linked module metadata");
         }
         if (nb>import_count) fail("invalid binding count");

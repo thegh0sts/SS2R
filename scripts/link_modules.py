@@ -128,7 +128,12 @@ def link(game, out, module_names=DEFAULT_MODULES):
     fs_patched = patch_fs_loads(image, main['ph'], 0)
     tls_module = 2
     for filename in module_names:
-        m = module(game / 'sce_module' / filename)
+        path = game / 'sce_module' / filename
+        if not path.exists():
+            path = game / 'prx' / filename   # app-loaded modules (fmod, PlayFab, Party)
+        if not path.exists():
+            path = game / filename   # script modules (allobjs, nvscript, squirrel) sit in the root
+        m = module(path)
         loads = [p for p in m['ph'] if p['type'] in (1, 0x61000010)]
         modsize = max(p['vaddr'] + p['memsz'] for p in loads)
         if base + modsize > 512 * 1024 * 1024:
@@ -226,6 +231,9 @@ def link(game, out, module_names=DEFAULT_MODULES):
                      or main_tls['vaddr'] + main_tls['filesz'] > size):
         raise ValueError('unsupported eboot TLS layout')
     procparam = next(p for p in main['ph'] if p['type'] == 0x61000001)
+    with (out / 'module_exports.txt').open('w', encoding='utf-8', newline='\n') as f:
+        for identity, (address, kind, filename) in exports.items():
+            f.write(f'{filename} {identity[0]} {address:#x}\n')
     with (out / 'boot-linked.bin').open('wb') as f:
         f.write(struct.pack('<8s6Q', b'BBPROBE5', len(image), entry, len(segments), len(relocs), len(names), flags))
         f.write(struct.pack('<Q', procparam['vaddr']))

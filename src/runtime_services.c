@@ -722,6 +722,153 @@ static ABI int32_t sched_set(void* thread, int32_t policy, const int32_t* param)
     (void)thread; (void)policy; (void)param; return 0;
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * Runtime-loaded modules: sceKernelLoadStartModule / sceKernelDlsym / sceKernelStopUnloadModule.
+ * REPLACES the earlier load_start_module and stop_unload_module functions in runtime_services.c.
+ *
+ * link_modules.py links the PRXs the game loads itself (fmod, PlayFab, the Dark Engine script
+ * modules allobjs/nvscript/squirrel, ...) ahead of time, runs their initializers at start, and
+ * lists every export in out\module_exports.txt as "file NID image-offset". A load returns a
+ * handle for a linked file; a lookup hashes the symbol name to its NID (SHA-1 of the name plus
+ * the PS4 suffix, first 8 bytes reversed, base64 with '-' for '/') and finds that export.
+ * Party.prx is linked but its initializer is skipped (online only), so it reports "not found".
+ * --------------------------------------------------------------------------------------------- */
+#define MOD_ERROR_NOENT ((int32_t)0x80020002) /* SCE_KERNEL_ERROR_ENOENT */
+#define MOD_HANDLE_BASE 0x1000
+#define MOD_MAX_FILES 32
+
+typedef struct { int file; char nid[12]; uint64_t offset; } ModExport;
+static ModExport* mod_exports;
+static size_t mod_export_count;
+static char mod_files[MOD_MAX_FILES][64];
+static int mod_file_count;
+static pthread_once_t mod_once = PTHREAD_ONCE_INIT;
+
+static void mod_load_table(void) {
+    FILE* f = fopen("module_exports.txt", "r");   /* the game runs in out\ */
+    if (!f) { puts("Runtime: module_exports.txt not found; rerun link_modules.py (Prepare)"); return; }
+    char file[64], nid[16];
+    unsigned long long offset;
+    size_t capacity = 0;
+    while (fscanf(f, "%63s %15s %llx", file, nid, &offset) == 3) {
+        int index = -1;
+        for (int i = 0; i < mod_file_count; ++i)
+            if (!_stricmp(mod_files[i], file)) { index = i; break; }
+        if (index < 0) {
+            if (mod_file_count == MOD_MAX_FILES) continue;
+            index = mod_file_count++;
+            memcpy(mod_files[index], file, strlen(file) + 1);   /* %63s: fits */
+        }
+        if (mod_export_count == capacity) {
+            capacity = capacity ? capacity * 2 : 4096;
+            ModExport* grown = realloc(mod_exports, capacity * sizeof * mod_exports);
+            if (!grown) break;
+            mod_exports = grown;
+        }
+        ModExport* e = &mod_exports[mod_export_count++];
+        e->file = index;
+        memcpy(e->nid, nid, 11);
+        e->nid[11] = 0;
+        e->offset = offset;
+    }
+    fclose(f);
+    printf("Runtime: %zu exports of %d linked modules available to sceKernelDlsym\n", mod_export_count, mod_file_count);
+}
+
+static void mod_sha1(const unsigned char* data, size_t len, unsigned char out[20]) {
+    uint32_t h[5] = { 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0 };
+    const size_t total = ((len + 8) / 64 + 1) * 64;
+    unsigned char* m = calloc(1, total);
+    if (!m) { memset(out, 0, 20); return; }
+    memcpy(m, data, len);
+    m[len] = 0x80;
+    const uint64_t bits = (uint64_t)len * 8;
+    for (int i = 0; i < 8; ++i) m[total - 1 - i] = (unsigned char)(bits >> (8 * i));
+    for (size_t c = 0; c < total; c += 64) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; ++i)
+            w[i] = (uint32_t)m[c + 4 * i] << 24 | (uint32_t)m[c + 4 * i + 1] << 16 | (uint32_t)m[c + 4 * i + 2] << 8 | m[c + 4 * i + 3];
+        for (int i = 16; i < 80; ++i) { uint32_t t = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]; w[i] = t << 1 | t >> 31; }
+        uint32_t a = h[0], b = h[1], c2 = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; ++i) {
+            uint32_t f, k;
+            if (i < 20) { f = (b & c2) | (~b & d); k = 0x5A827999; }
+            else if (i < 40) { f = b ^ c2 ^ d; k = 0x6ED9EBA1; }
+            else if (i < 60) { f = (b & c2) | (b & d) | (c2 & d); k = 0x8F1BBCDC; }
+            else { f = b ^ c2 ^ d; k = 0xCA62C1D6; }
+            const uint32_t t = (a << 5 | a >> 27) + f + e + k + w[i];
+            e = d; d = c2; c2 = b << 30 | b >> 2; b = a; a = t;
+        }
+        h[0] += a; h[1] += b; h[2] += c2; h[3] += d; h[4] += e;
+    }
+    free(m);
+    for (int i = 0; i < 5; ++i) {
+        out[4 * i] = (unsigned char)(h[i] >> 24); out[4 * i + 1] = (unsigned char)(h[i] >> 16);
+        out[4 * i + 2] = (unsigned char)(h[i] >> 8); out[4 * i + 3] = (unsigned char)h[i];
+    }
+}
+
+/* The PS4 NID of a symbol name (malloc -> gQX+4GDQjpM). */
+static void mod_symbol_nid(const char* name, char nid[12]) {
+    static const unsigned char salt[16] = { 0x51, 0x8d, 0x64, 0xa6, 0x35, 0xde, 0xd8, 0xc1,
+                                           0xe6, 0xb0, 0x39, 0xb1, 0xc3, 0xe5, 0x52, 0x30 };
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+    const size_t n = strlen(name);
+    unsigned char* buf = malloc(n + 16), digest[20], v[9] = { 0 };
+    if (!buf) { nid[0] = 0; return; }
+    memcpy(buf, name, n);
+    memcpy(buf + n, salt, 16);
+    mod_sha1(buf, n + 16, digest);
+    free(buf);
+    for (int i = 0; i < 8; ++i) v[i] = digest[7 - i];
+    for (int i = 0, o = 0; o < 11; i += 3) {
+        const uint32_t x = (uint32_t)v[i] << 16 | (uint32_t)v[i + 1] << 8 | v[i + 2];
+        for (int j = 0; j < 4 && o < 11; ++j) nid[o++] = b64[(x >> (18 - 6 * j)) & 63];
+    }
+    nid[11] = 0;
+}
+
+static ABI int32_t load_start_module(const char* path, uint64_t argc, const void* argv, uint32_t flags,
+    const void* option, int32_t* result) {
+    (void)argc; (void)argv; (void)flags; (void)option;
+    pthread_once(&mod_once, mod_load_table);
+    const char* name = path ? strrchr(path, '/') : NULL;
+    name = name ? name + 1 : (path ? path : "");
+    if (_stricmp(name, "Party.prx") != 0)
+        for (int i = 0; i < mod_file_count; ++i)
+            if (!_stricmp(name, mod_files[i])) {
+                printf("Runtime: sceKernelLoadStartModule(%s) -> linked, handle %#x\n", path, MOD_HANDLE_BASE + i);
+                if (result) *result = 0;
+                return MOD_HANDLE_BASE + i;
+            }
+    printf("Runtime: sceKernelLoadStartModule(%s) -> not available\n", path ? path : "(null)");
+    return MOD_ERROR_NOENT;
+}
+
+static ABI int32_t stop_unload_module(int32_t handle, uint64_t argc, const void* argv, uint32_t flags,
+    const void* option, int32_t* result) {
+    (void)handle; (void)argc; (void)argv; (void)flags; (void)option;
+    if (result) *result = 0;
+    return 0;   /* linked modules stay loaded */
+}
+
+static ABI int32_t module_dlsym(int32_t handle, const char* symbol, void** address) {
+    pthread_once(&mod_once, mod_load_table);
+    const int file = handle - MOD_HANDLE_BASE;
+    if (!symbol || !address || file < 0 || file >= mod_file_count) return MOD_ERROR_NOENT;
+    char nid[12];
+    mod_symbol_nid(symbol, nid);
+    for (size_t i = 0; i < mod_export_count; ++i)
+        if (mod_exports[i].file == file && !strcmp(mod_exports[i].nid, nid)) {
+            *address = (void*)(runtime_probe_image(NULL) + mod_exports[i].offset);
+            printf("Runtime: sceKernelDlsym(%s, %s) -> +%#llx\n", mod_files[file], symbol,
+                (unsigned long long)mod_exports[i].offset);
+            return 0;
+        }
+    printf("Runtime: sceKernelDlsym(%s, %s) -> not found (NID %s)\n", mod_files[file], symbol, nid);
+    return MOD_ERROR_NOENT;
+}
+
 static const RuntimeExport exports[]={
     {"sceUserServiceInitialize",user_initialize}, {"sceUserServiceTerminate",user_terminate},
     {"sceUserServiceGetInitialUser",user_initial}, {"sceUserServiceGetLoginUserIdList",user_list},
@@ -897,6 +1044,7 @@ static const RuntimeExport exports[]={
     { "sceNgs2VoiceControl",ngs2_voice_control }, { "sceNgs2VoiceGetState",ngs2_voice_state },
     { "sceNgs2VoiceGetStateFlags",ngs2_voice_flags },
     { "sceNgs2PanInit",ngs2_ok }, { "sceNgs2PanGetVolumeMatrix",ngs2_ok }, { "scePthreadGetschedparam",sched_get }, { "scePthreadSetschedparam",sched_set },
-    { "pthread_getschedparam",sched_get }, { "pthread_setschedparam",sched_set },
+    { "pthread_getschedparam",sched_get }, { "pthread_setschedparam",sched_set }, { "sceKernelLoadStartModule",load_start_module }, { "sceKernelStopUnloadModule",stop_unload_module },
+    { "sceKernelDlsym",module_dlsym }, { "sceKernelStopUnloadModule",stop_unload_module },
 };
 uintptr_t runtime_services_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

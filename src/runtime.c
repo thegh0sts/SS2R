@@ -26,7 +26,7 @@ static _Atomic size_t guards_acquired, guards_released;
 static uint64_t stack_canary;
 static _Atomic size_t memory_calls;
 /* Dynamic TLS of linked modules: module IDs 2..7 (1 is the eboot's static TLS). */
-#define TLS_MODULES 8
+#define TLS_MODULES 16
 static struct { const void *data; uint64_t filesz, memsz; } tls_modules[TLS_MODULES];
 static _Thread_local unsigned char *tls_blocks[TLS_MODULES];
 static void* process_param;
@@ -214,18 +214,7 @@ static ABI void *guest_memmove(void *dst, const void *src, size_t size) {
 static ABI int guest_memcmp(const void *a, const void *b, size_t size) {
     atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memcmp(a, b, size);
 }
-static ABI size_t guest_strlen(const char *text) {
-    MEMORY_BASIC_INFORMATION mbi;
-    // Safe Win32 Probe: Check the host OS page allocation state fields natively
-    if (!VirtualQuery(text, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
-        printf("strlen(bad %p) from guest +0x%llx\n", (void *)text,
-               (unsigned long long)((uintptr_t)__builtin_return_address(0) - runtime_probe_image(NULL)));
-        fflush(stdout);
-        __builtin_trap(); /* Hard stop here to provide a clean first-chance context trap in GDB */
-    }
-    return strlen(text);
-}
+static ABI size_t guest_strlen(const char* text) { return strlen(text); }
 static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
     printf("Runtime: guest requested exit(%d)\n", status);
     runtime_finalize(NULL);
